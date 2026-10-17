@@ -1078,8 +1078,8 @@
                   min: [-149.5056, -62.37716, -60.19394], max: [164.14674, 41.62352, 60.19393] },
     sedan:      { url: 'models/sedan.json',      length: 4.75,  yaw: Math.PI,
                   min: [0, 0, -41.20945], max: [17.88422, 12.16401, 0.00476] },
-    sports:     { url: 'models/sports.json',     length: 4.58,  yaw: Math.PI,
-                  min: [-0.01049, -0.00015, -0.02289], max: [0.01049, 0.01371, 0.02344] },
+    sports:     { url: 'models/sports.json',     length: 4.79,  yaw: Math.PI,
+                  min: [-1.04507, 0.01437, -2.39551], max: [1.04507, 1.3699, 2.45306] },
     hatchback:  { url: 'models/hatchback.json',  length: 4.64,  yaw: Math.PI,
                   min: [-0.01047, -0.00013, -0.0245], max: [0.01047, 0.01488, 0.02199] },
     compactvan: { url: 'models/compactvan.json', length: 4.82,  yaw: Math.PI,
@@ -1156,10 +1156,34 @@
     });
     })();
   }
+  // Full-quality copies (models/hq/) replace the light ones when you look at a car up close,
+  // and load quietly for the visible type on a good connection
+  var hqState = {};
+  function goodLink() {
+    var c = navigator.connection;
+    return !(c && (c.saveData || /(^|-)2g|3g/.test(c.effectiveType || '')));
+  }
+  function loadHQ(k, onDone) {
+    if (!useGlb || !REAL[k] || hqState[k] || realState[k] !== 'done') { if (onDone) onDone(); return; }
+    hqState[k] = 'loading';
+    if (focus === k) { loadingEl.hidden = false; loadingEl.textContent = 'بيحمّل الجودة الكاملة…'; }
+    gltfLoader.load(REAL[k].url.replace('models/', 'models/hq/').replace(/\.json$/, '.glb'), function (gltf) {
+      var r = prepReal(gltf.scene, REAL[k]);
+      realScenes[k] = r.group; CAR_META[k].roof = r.height; hqState[k] = 'done';
+      if (carKeys.indexOf(k) >= 0) swapInReal(k);
+      updateLoading(); if (onDone) onDone();
+    }, undefined, function () { hqState[k] = 'failed'; updateLoading(); if (onDone) onDone(); });
+  }
+  function loadHQFor(type) {
+    if (!goodLink()) return;
+    var q = CARS_BY_TYPE[type].slice();
+    (function next() { var k = q.shift(); if (k && bodyType === type) loadHQ(k, next); })();
+  }
+  window.__hq = loadHQ;
   function loadRealFor(type) {
     var ks = CARS_BY_TYPE[type].filter(function (k) { return REAL[k] && !realState[k]; }), left = ks.length;
-    ks.forEach(function (k) { loadReal(k, function () { if (--left === 0) scheduleIdlePreload(); }); });
-    if (!ks.length) scheduleIdlePreload();
+    ks.forEach(function (k) { loadReal(k, function () { if (--left === 0) { scheduleIdlePreload(); loadHQFor(type); } }); });
+    if (!ks.length) { scheduleIdlePreload(); loadHQFor(type); }
   }
   // Once the visible type is in, quietly fetch the rest one by one so switching types is instant
   var idleTimer = null;
@@ -1171,7 +1195,7 @@
       var queue = [];
       BODY_TYPES.forEach(function (t) { CARS_BY_TYPE[t.key].forEach(function (k) { if (REAL[k] && !realState[k]) queue.push(k); }); });
       (function next() {
-        if (CARS_BY_TYPE[bodyType].some(function (k) { return realState[k] === 'loading'; })) { idleTimer = setTimeout(next, 800); return; }
+        if (CARS_BY_TYPE[bodyType].some(function (k) { return realState[k] === 'loading' || hqState[k] === 'loading'; })) { idleTimer = setTimeout(next, 800); return; }
         var k = queue.shift(); if (k) loadReal(k, next);
       })();
     }, 1200);
@@ -1184,7 +1208,8 @@
   window.__preload = preloadType;
   function updateLoading() {
     var ks = CARS_BY_TYPE[bodyType].filter(function (k) { return realState[k] === 'loading'; });
-    loadingEl.hidden = !ks.length;
+    loadingEl.hidden = !ks.length && !(focus !== 'all' && hqState[focus] === 'loading');
+    if (!ks.length && !loadingEl.hidden) loadingEl.textContent = 'بيحمّل الجودة الكاملة…';
     if (ks.length) {
       var all = CARS_BY_TYPE[bodyType].filter(function (k) { return REAL[k]; });
       var pct = all.reduce(function (a, k) { return a + (realState[k] === 'loading' ? (realProgress[k] || 0) : 1); }, 0) / all.length;
@@ -1321,6 +1346,7 @@
   }
   function goTo(v, f, instant) {
     view = v; focus = f;
+    if (f !== 'all' && window.__hq) window.__hq(f);                 // up close: get the full-quality model
     startTween(viewSpec(v, f), instant);
     refreshUI();
   }
