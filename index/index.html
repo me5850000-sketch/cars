@@ -167,13 +167,14 @@
     </div>
   </nav>
 
-  <p class="note" lang="ar" dir="rtl">الأنواع اللي لسه ملهاش موديل حقيقي معروضة بمجسمات مبسّطة بتوضّح الشكل العام.</p>
+  <p class="note" lang="ar" dir="rtl">كل عربية معروضة بمقاسها الحقيقي بالمتر، عشان تقارن الأحجام ببعض.</p>
 </main>
 
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/environments/RoomEnvironment.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/libs/meshopt_decoder.js"></script>
 <script>
 (function () {
   'use strict';
@@ -257,6 +258,7 @@
     b.innerHTML = '<span class="en">' + t.en + '</span><span class="ar" lang="ar" dir="rtl">' + t.ar + '</span>' +
       '<span class="n">' + CARS_BY_TYPE[t.key].length + ' SHAPES</span>';
     b.addEventListener('click', function () { if (t.key !== bodyType) setType(t.key); });
+    ['pointerenter', 'focus'].forEach(function (ev) { b.addEventListener(ev, function () { if (window.__preload) window.__preload(t.key); }); });
     typesEl.appendChild(b);
   });
 
@@ -320,7 +322,8 @@
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
   renderer.outputEncoding = THREE.sRGBEncoding;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure = 1.05;
+  renderer.toneMappingExposure = 1.12;
+  renderer.physicallyCorrectLights = false;
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
   viewer.appendChild(renderer.domElement);
@@ -354,12 +357,14 @@
     } catch (e) { hasEnv = false; }
   }
   if (!hasEnv && renderer.capabilities.isWebGL2) { scene.environment = makeEnv(); hasEnv = true; }
-  scene.add(new THREE.AmbientLight(0x9fb0d6, hasEnv ? 0.2 : 0.35));
+
+  scene.add(new THREE.AmbientLight(0x9fb0d6, hasEnv ? 0.15 : 0.35));
   scene.add(new THREE.HemisphereLight(0x8aa0d0, 0x10131c, hasEnv ? 0.28 : 0.35));
-  var keyL = new THREE.DirectionalLight(0xdfe8ff, 0.85);
-  keyL.position.set(-8, 14, -6);
+  var keyL = new THREE.DirectionalLight(0xfff4e6, 1.0);           // warm overhead key, like a showroom softbox
+  keyL.position.set(-4, 16, 6);
   keyL.castShadow = true;
   keyL.shadow.mapSize.set(2048, 2048);
+  keyL.shadow.bias = -0.0004; keyL.shadow.normalBias = 0.02;
   keyL.shadow.camera.left = -13; keyL.shadow.camera.right = 13;
   keyL.shadow.camera.top = 13; keyL.shadow.camera.bottom = -13;
   keyL.shadow.camera.near = 1; keyL.shadow.camera.far = 45;
@@ -368,14 +373,48 @@
   var rimB = new THREE.DirectionalLight(0x9fb4ff, 0.4); rimB.position.set(-9, 4, -12); scene.add(rimB);
   var fillL = new THREE.DirectionalLight(0x8fa6d8, 0.3); fillL.position.set(10, 4, -4); scene.add(fillL);
 
-  var ground = new THREE.Mesh(new THREE.CircleGeometry(15, 72).rotateX(-Math.PI / 2),
-    new THREE.MeshStandardMaterial({ color: 0x05070b, roughness: 1, metalness: 0, envMapIntensity: 0.03 }));
+  function radialTex(stops) {
+    var c = document.createElement('canvas'); c.width = c.height = 512;
+    var g = c.getContext('2d'), gr = g.createRadialGradient(256, 256, 0, 256, 256, 256);
+    stops.forEach(function (st) { gr.addColorStop(st[0], st[1]); });
+    g.fillStyle = gr; g.fillRect(0, 0, 512, 512);
+    var t = new THREE.CanvasTexture(c); t.encoding = THREE.sRGBEncoding; return t;
+  }
+  // Studio floor: a lit pool in the middle that fades into the dark backdrop (no visible edge)
+  var ground = new THREE.Mesh(new THREE.CircleGeometry(15, 96).rotateX(-Math.PI / 2),
+    new THREE.MeshStandardMaterial({
+      color: 0x1b2130, roughness: 0.5, metalness: 0.2, envMapIntensity: 0.2, transparent: true, depthWrite: false,
+      map: radialTex([[0, '#d9dde6'], [0.4, '#8d95a6'], [1, '#1d212b']]),
+      alphaMap: radialTex([[0, '#ffffff'], [0.55, '#ffffff'], [1, '#000000']])
+    }));
   ground.receiveShadow = true;
+  ground.renderOrder = -1;
   scene.add(ground);
-  var ring = new THREE.Mesh(new THREE.RingGeometry(12.2, 12.32, 120).rotateX(-Math.PI / 2),
-    new THREE.MeshBasicMaterial({ color: 0x33405e, transparent: true, opacity: 0.8 }));
-  ring.position.y = 0.01;
-  scene.add(ring);
+  var shadowCatcher = new THREE.Mesh(new THREE.PlaneGeometry(60, 60).rotateX(-Math.PI / 2),
+    new THREE.ShadowMaterial({ opacity: 0.38 }));                 // only the cast shadows, on top of the floor
+  shadowCatcher.receiveShadow = true; shadowCatcher.position.y = 0.002;
+  scene.add(shadowCatcher);
+  var ring = new THREE.Object3D();                                   // kept so layout code can scale it
+
+  // Soft contact shadow under each car (ambient occlusion where the tyres meet the floor)
+  var contactTex = (function () {
+    var c = document.createElement('canvas'); c.width = 256; c.height = 512;
+    var g = c.getContext('2d');
+    g.shadowColor = 'rgba(0,0,0,1)'; g.shadowBlur = 48; g.shadowOffsetX = 1000;
+    g.fillStyle = '#000';
+    g.beginPath();
+    if (g.roundRect) g.roundRect(64 - 1000, 70, 128, 372, 48); else g.rect(64 - 1000, 70, 128, 372);
+    g.fill();
+    return new THREE.CanvasTexture(c);
+  })();
+  function contactShadow(len, wid) {
+    var m = new THREE.Mesh(new THREE.PlaneGeometry(wid * 1.55, len * 1.28).rotateX(-Math.PI / 2),
+      new THREE.MeshBasicMaterial({ map: contactTex, transparent: true, opacity: 0.85, depthWrite: false, color: 0x000000 }));
+    m.material.alphaMap = contactTex;
+    m.position.y = 0.004; m.renderOrder = 1;
+    m.userData.contact = true;
+    return m;
+  }
 
   /* ----- shared materials ----- */
   function paint(hex, metal, rough) {
@@ -1004,23 +1043,50 @@
   /* ---------- Real GLB models (replace the procedural car when present) ---------- */
   // Real models live next to the page in models/. min/max = source bounds, length = real length in metres,
   // flip = the file's front faces +z (our cars face -z).
+  // yaw = turn applied to the file so its front faces -z (0 = already does, PI = faces +z, ±PI/2 = file is built along x)
   var REAL = {
-    suv:       { url: 'models/suv.json',       length: 4.66,  flip: true, 
-                 min: [-0.01028, 0.00001, -0.02438], max: [0.01028, 0.01941, 0.02297] },
-    crossover: { url: 'models/crossover.json', length: 4.858, flip: true,
-                 min: [-1.11954, -0.42919, -3.9286], max: [1.11954, 1.31119, 0.90836] },
-    minivan:   { url: 'models/minivan.json',   length: 5.21,  flip: true, 
-                 min: [-30.06313, -0.02533, -64.89034], max: [30.06313, 44.28107, 64.46596] }
+    suv:        { url: 'models/suv.json',        length: 4.66,  yaw: Math.PI,
+                  min: [-0.01028, 0.00001, -0.02438], max: [0.01028, 0.01941, 0.02297] },
+    crossover:  { url: 'models/crossover.json',  length: 4.858, yaw: Math.PI,
+                  min: [-1.11954, -0.42919, -3.9286], max: [1.11954, 1.31119, 0.90836] },
+    minivan:    { url: 'models/minivan.json',    length: 5.21,  yaw: Math.PI,
+                  min: [-30.06313, -0.02533, -64.89034], max: [30.06313, 44.28107, 64.46596] },
+    crewcab:    { url: 'models/crewcab.json',    length: 5.89,  yaw: Math.PI,
+                  min: [-0.01209, -0.00043, -0.02952], max: [0.01209, 0.02152, 0.02949] },
+    regularcab: { url: 'models/regularcab.json', length: 5.40,  yaw: Math.PI,
+                  min: [-0.01075, -0.00897, -0.02682], max: [0.01075, 0.01113, 0.02728] },
+    worktruck:  { url: 'models/worktruck.json',  length: 6.20,  yaw: Math.PI / 2,
+                  min: [-2.54283, 0.02853, -1.00104], max: [2.82948, 1.68563, 1.00104] },
+    cybertruck: { url: 'models/cybertruck.json', length: 5.68,  yaw: -Math.PI / 2,
+                  min: [-149.5056, -62.37716, -60.19394], max: [164.14674, 41.62352, 60.19393] },
+    sedan:      { url: 'models/sedan.json',      length: 4.75,  yaw: Math.PI,
+                  min: [0, 0, -41.20945], max: [17.88422, 12.16401, 0.00476] },
+    sports:     { url: 'models/sports.json',     length: 4.79,  yaw: Math.PI,
+                  min: [-1.04507, 0.01437, -2.39551], max: [1.04507, 1.3699, 2.45306] },
+    hatchback:  { url: 'models/hatchback.json',  length: 4.64,  yaw: Math.PI,
+                  min: [-0.01047, -0.00013, -0.0245], max: [0.01047, 0.01488, 0.02199] },
+    compactvan: { url: 'models/compactvan.json', length: 4.82,  yaw: Math.PI,
+                  min: [-1.05903, -0.00032, -2.29877], max: [1.05906, 1.69434, 2.29883] },
+    cargovan:   { url: 'models/cargovan.json',   length: 5.98,  yaw: Math.PI,
+                  min: [-1.30741, -1.05774, -3.64232], max: [1.29794, 1.57264, 2.7693] },
+    passengervan: { url: 'models/passengervan.json', length: 6.20, yaw: Math.PI / 2,
+                  min: [-335.34, 0, -116.949], max: [335.34, 277.82999, 116.949] }
   };
   var realScenes = {};
   // Bounds come from the source file (Box3 misreads quantized meshes in three r128)
   function prepReal(root, cfg) {
-    var w = new THREE.Group(), mn = cfg.min, mx = cfg.max;
-    var sc = cfg.length / (mx[2] - mn[2]);
-    var cx = (mn[0] + mx[0]) / 2, cz = (mn[2] + mx[2]) / 2, f = cfg.flip ? -1 : 1;
+    var w = new THREE.Group(), mn = cfg.min, mx = cfg.max, yaw = cfg.yaw || 0;
+    var c = Math.cos(yaw), s = Math.sin(yaw), x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity;
+    [mn[0], mx[0]].forEach(function (x) {                      // footprint after the turn
+      [mn[2], mx[2]].forEach(function (z) {
+        var rx = x * c + z * s, rz = -x * s + z * c;
+        x0 = Math.min(x0, rx); x1 = Math.max(x1, rx); z0 = Math.min(z0, rz); z1 = Math.max(z1, rz);
+      });
+    });
+    var sc = cfg.length / (z1 - z0);
     root.scale.multiplyScalar(sc);
-    if (cfg.flip) root.rotation.y = Math.PI;
-    root.position.set(-f * cx * sc, -mn[1] * sc, -f * cz * sc);
+    root.rotation.y = yaw;
+    root.position.set(-(x0 + x1) / 2 * sc, -mn[1] * sc, -(z0 + z1) / 2 * sc);
     w.add(root);
     w.traverse(function (o) {
       if (o.isMesh) {
@@ -1035,29 +1101,78 @@
   // textures. Without createImageBitmap it falls back to <img>, which the CSP allows.
   try { window.createImageBitmap = undefined; } catch (e) {}
   var gltfLoader = THREE.GLTFLoader ? new THREE.GLTFLoader() : null;
-  function loadRealFor(type) {
-    if (!gltfLoader) return;
-    CARS_BY_TYPE[type].forEach(function (k) {
-      if (!REAL[k] || realState[k]) return;
-      realState[k] = 'loading';
-      updateLoading();
-      gltfLoader.load(REAL[k].url, function (gltf) {
-        var r = prepReal(gltf.scene, REAL[k]);
-        realScenes[k] = r.group;
-        CAR_META[k].roof = r.height;
-        realState[k] = 'done';
-        updateLoading();
-        if (CARS_BY_TYPE[bodyType].indexOf(k) >= 0) { loadType(bodyType); refreshUI(); }
-      }, undefined, function (err) {
-        realState[k] = 'failed';                                     // keep the simplified car
-        updateLoading();
-        console.warn('Model load failed for ' + k, err);
-      });
-    });
+  // Fast path: compact .glb files (meshopt-compressed, ~3x smaller). It needs WebAssembly; where that is blocked
+  // or the .glb isn't there, fall back to the plain .json copy.
+  var canWasm = (function () {
+    try { return !!(window.WebAssembly && new WebAssembly.Module(new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0]))); }
+    catch (e) { return false; }
+  })();
+  var useGlb = canWasm && !!window.MeshoptDecoder;
+  if (gltfLoader && useGlb) gltfLoader.setMeshoptDecoder(window.MeshoptDecoder);
+  function modelUrls(k) {
+    var json = REAL[k].url;
+    return useGlb ? [json.replace(/\.json$/, '.glb'), json] : [json];
   }
+  var realProgress = {};                                           // key -> 0..1 while downloading
+  function loadReal(k, onDone) {
+    if (!gltfLoader || !REAL[k] || realState[k]) return;
+    realState[k] = 'loading'; realProgress[k] = 0;
+    updateLoading();
+    var urls = modelUrls(k);
+    (function attempt() {
+    gltfLoader.load(urls.shift(), function (gltf) {
+      var r = prepReal(gltf.scene, REAL[k]);
+      realScenes[k] = r.group;
+      CAR_META[k].roof = r.height;
+      realState[k] = 'done'; realProgress[k] = 1;
+      updateLoading();
+      if (carKeys.indexOf(k) >= 0) swapInReal(k);
+      if (onDone) onDone();
+    }, function (ev) {
+      if (ev && ev.total) { realProgress[k] = ev.loaded / ev.total; updateLoading(); }
+    }, function (err) {
+      if (urls.length) { attempt(); return; }                        // try the next copy
+      realState[k] = 'failed';                                       // keep the simplified car
+      updateLoading();
+      console.warn('Model load failed for ' + k, err);
+      if (onDone) onDone();
+    });
+    })();
+  }
+  function loadRealFor(type) {
+    var ks = CARS_BY_TYPE[type].filter(function (k) { return REAL[k] && !realState[k]; }), left = ks.length;
+    ks.forEach(function (k) { loadReal(k, function () { if (--left === 0) scheduleIdlePreload(); }); });
+    if (!ks.length) scheduleIdlePreload();
+  }
+  // Once the visible type is in, quietly fetch the rest one by one so switching types is instant
+  var idleTimer = null;
+  function scheduleIdlePreload() {
+    var c = navigator.connection;
+    if (!useGlb || (c && (c.saveData || /2g/.test(c.effectiveType || '')))) return;   // only with the small files
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(function () {
+      var queue = [];
+      BODY_TYPES.forEach(function (t) { CARS_BY_TYPE[t.key].forEach(function (k) { if (REAL[k] && !realState[k]) queue.push(k); }); });
+      (function next() {
+        if (CARS_BY_TYPE[bodyType].some(function (k) { return realState[k] === 'loading'; })) { idleTimer = setTimeout(next, 800); return; }
+        var k = queue.shift(); if (k) loadReal(k, next);
+      })();
+    }, 1200);
+  }
+  // Warm up the next type when the pointer rests on its button, one model at a time
+  function preloadType(type) {
+    var queue = CARS_BY_TYPE[type].filter(function (k) { return REAL[k] && !realState[k]; });
+    (function next() { var k = queue.shift(); if (k) loadReal(k, next); })();
+  }
+  window.__preload = preloadType;
   function updateLoading() {
-    var busy = CARS_BY_TYPE[bodyType].some(function (k) { return realState[k] === 'loading'; });
-    loadingEl.hidden = !busy;
+    var ks = CARS_BY_TYPE[bodyType].filter(function (k) { return realState[k] === 'loading'; });
+    loadingEl.hidden = !ks.length;
+    if (ks.length) {
+      var all = CARS_BY_TYPE[bodyType].filter(function (k) { return REAL[k]; });
+      var pct = all.reduce(function (a, k) { return a + (realState[k] === 'loading' ? (realProgress[k] || 0) : 1); }, 0) / all.length;
+      loadingEl.textContent = 'بيحمّل الموديلات الحقيقية… ' + Math.round(pct * 100) + '%';
+    }
   }
 
   var BUILDERS = { cybertruck: buildCybertruck, crewcab: buildCrewCab, regularcab: buildRegularCab, worktruck: buildWorkTruck, compactvan: buildCompactVan, cargovan: buildCargoVan, passengervan: buildPassengerVan, suv: buildSUV, crossover: buildCrossover, minivan: buildMinivan, sedan: buildSedan, sports: buildSports, hatchback: buildHatchback };
@@ -1071,39 +1186,55 @@
     scene.remove(g);
   }
   // All cars of a type stand in one row, side by side in profile, fronts facing +x
-  var GAP = 1.2, rowLen = 15;
-  function carLength(k, c) {
-    if (realScenes[k] && REAL[k]) return REAL[k].length;
-    return new THREE.Box3().setFromObject(c).getSize(new THREE.Vector3()).z;
+  var GAP = 1.4, rowLen = 15, carLens = {};
+  function footprint(k, c) {
+    if (realScenes[k] && REAL[k]) {
+      var r = REAL[k], yaw = r.yaw || 0, along = Math.abs(Math.cos(yaw)) > 0.5 ? 2 : 0;
+      var sc = r.length / (r.max[along] - r.min[along]);
+      return { len: r.length, wid: (r.max[2 - along] - r.min[2 - along]) * sc };
+    }
+    var sz = new THREE.Box3().setFromObject(c).getSize(new THREE.Vector3());
+    return { len: sz.z, wid: sz.x };
+  }
+  function makeCar(k) {
+    var body = realScenes[k] ? realScenes[k].clone() : BUILDERS[k]();
+    var fp = footprint(k, body);
+    body.traverse(function (o) { if (o.isMesh) o.castShadow = true; });
+    var holder = new THREE.Group();                                  // holder turns the car to face +x
+    holder.add(body);
+    holder.add(contactShadow(fp.len, fp.wid));
+    holder.rotation.y = -Math.PI / 2;
+    holder.userData.key = k; holder.userData.len = fp.len;
+    return holder;
+  }
+  // Work out where each car stands; cars glide to new spots instead of jumping
+  function layoutRow(snap) {
+    var cars = stageGroup.children;
+    rowLen = cars.reduce(function (a, c) { return a + c.userData.len; }, 0) + GAP * (cars.length - 1);
+    var gs = Math.max(1, (rowLen / 2 + 5) / 15);
+    ground.scale.set(gs, 1, gs);
+    var sc = rowLen / 2 + 4;
+    keyL.shadow.camera.left = -sc; keyL.shadow.camera.right = sc; keyL.shadow.camera.top = sc; keyL.shadow.camera.bottom = -sc;
+    keyL.shadow.camera.updateProjectionMatrix();
+    var x = -rowLen / 2;
+    cars.forEach(function (c) {
+      var cx = x + c.userData.len / 2;
+      x += c.userData.len + GAP;
+      c.userData.tx = cx;
+      if (snap) c.position.x = cx;
+      carPos[c.userData.key] = new THREE.Vector3(cx, 0, 0);
+    });
   }
   function loadType(type, animate) {
     if (stageGroup) clearGroup(stageGroup);
     stageGroup = new THREE.Group();
     scene.add(stageGroup);
     carKeys = CARS_BY_TYPE[type];
-    loadRealFor(type);
-    var cars = carKeys.map(function (k) { return realScenes[k] ? realScenes[k].clone() : BUILDERS[k](); });
-    var lens = cars.map(function (c, i) { return carLength(carKeys[i], c); });
-    rowLen = lens.reduce(function (a, b) { return a + b; }, 0) + GAP * (cars.length - 1);
-    var gs = Math.max(1, (rowLen / 2 + 4) / 15);
-    ground.scale.set(gs, 1, gs); ring.scale.set(gs, 1, gs);
-    var sc = 13 * gs;
-    keyL.shadow.camera.left = -sc; keyL.shadow.camera.right = sc; keyL.shadow.camera.top = sc; keyL.shadow.camera.bottom = -sc;
-    keyL.shadow.camera.updateProjectionMatrix();
     carPos = {};
     labelsEl.innerHTML = '';
     tags = {};
-    var x = -rowLen / 2, now = performance.now();
-    carKeys.forEach(function (k, i) {
-      var c = cars[i];
-      var cx = x + lens[i] / 2;
-      x += lens[i] + GAP;
-      c.rotation.y = -Math.PI / 2;
-      c.position.set(cx, 0, 0);
-      if (animate && !reduced) { c.userData.enter = { x: cx, t0: now + i * 110 }; c.position.x = cx - 7; }
-      c.traverse(function (o) { if (o.isMesh) o.castShadow = true; });
-      stageGroup.add(c);
-      carPos[k] = new THREE.Vector3(cx, 0, 0);
+    carKeys.forEach(function (k) {
+      stageGroup.add(makeCar(k));
       var t = document.createElement('button');
       t.type = 'button'; t.className = 'tag';
       t.innerHTML = '<span>' + CAR_META[k].en + '</span><small lang="ar" dir="rtl">' + CAR_META[k].ar + '</small>';
@@ -1111,6 +1242,28 @@
       labelsEl.appendChild(t);
       tags[k] = t;
     });
+    layoutRow(true);
+    if (animate && !reduced) {                                       // drive in one after another
+      var now = performance.now();
+      stageGroup.children.forEach(function (c, i) { c.userData.enter = { t0: now + i * 120 }; c.position.x -= 8; });
+    }
+    loadRealFor(type);
+  }
+  // A real model finished loading: swap it in where the simple one stood, then let the row re-space itself
+  function swapInReal(k) {
+    var i = carKeys.indexOf(k), old = stageGroup.children[i];
+    if (!old) return;
+    var car = makeCar(k);
+    car.position.copy(old.position);
+    car.userData.pop = performance.now();
+    if (old.userData.enter) car.userData.enter = old.userData.enter;
+    stageGroup.remove(old);
+    old.traverse(function (o) { if (o.geometry && !o.userData.real) o.geometry.dispose(); });
+    stageGroup.add(car);
+    stageGroup.children.splice(stageGroup.children.indexOf(car), 1);   // keep the row order
+    stageGroup.children.splice(i, 0, car);
+    layoutRow(false);
+    if (focus === k || focus === 'all') startTween(viewSpec(view || 'd3', focus));
   }
 
   /* ---------- Controls + camera views ---------- */
@@ -1131,10 +1284,13 @@
     rear: new THREE.Vector3(-11, 3.4, 13)
   };
   function viewSpec(v, f) {
-    var fit = Math.max(1, rowLen / 17) * (camera.aspect < 1.2 ? 1.55 : 1);
+    var fit = Math.max(1, rowLen / 20) * (camera.aspect < 1.2 ? 1.55 : 1) * (v === 'd3' ? 1.2 : 1);
     var base = (f === 'all' && OFFSETS_ALL[v]) ? OFFSETS_ALL[v] : OFFSETS[v];
     var t = new THREE.Vector3(0, 0.9, 0), off = base.clone().multiplyScalar(f === 'all' ? fit : 1);
-    if (f !== 'all' && carPos[f]) { t.copy(carPos[f]).add(new THREE.Vector3(0, 0.8, 0)); off.multiplyScalar(0.45); }
+    if (f !== 'all' && carPos[f]) {
+      var cl = (stageGroup && stageGroup.children[carKeys.indexOf(f)] || { userData: { len: 5 } }).userData.len;
+      t.copy(carPos[f]).add(new THREE.Vector3(0, 0.8, 0)); off.multiplyScalar(0.42 * Math.max(1, cl / 5) * (camera.aspect < 1.2 ? 1.35 : 1));
+    }
     return { target: t, pos: t.clone().add(off) };
   }
   var tween = null;
@@ -1144,7 +1300,7 @@
     var toS = new THREE.Spherical().setFromVector3(spec.pos.clone().sub(spec.target));
     var d = toS.theta - fromS.theta;
     d = ((d + Math.PI) % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI) - Math.PI;
-    tween = { fromT: fromT, toT: spec.target.clone(), fromS: fromS, toS: toS, dTheta: d, start: performance.now(), dur: (reduced || instant) ? 0 : 900 };
+    tween = { fromT: fromT, toT: spec.target.clone(), fromS: fromS, toS: toS, dTheta: d, start: performance.now(), dur: (reduced || instant) ? 0 : 1100 };
   }
   function goTo(v, f, instant) {
     view = v; focus = f;
@@ -1180,7 +1336,7 @@
     requestAnimationFrame(frame);
     if (tween) {
       var k = tween.dur ? Math.min(1, (now - tween.start) / tween.dur) : 1;
-      var e = 1 - Math.pow(1 - k, 3);
+      var e = k < 0.5 ? 4 * k * k * k : 1 - Math.pow(-2 * k + 2, 3) / 2;
       controls.target.lerpVectors(tween.fromT, tween.toT, e);
       sph.radius = tween.fromS.radius + (tween.toS.radius - tween.fromS.radius) * e;
       sph.phi = tween.fromS.phi + (tween.toS.phi - tween.fromS.phi) * e;
@@ -1188,12 +1344,20 @@
       camera.position.setFromSpherical(sph).add(controls.target);
       if (k >= 1) tween = null;
     }
-    if (stageGroup) stageGroup.children.forEach(function (c) {          // cars drive into their spots
-      var en = c.userData.enter;
-      if (!en) return;
-      var p = clamp((now - en.t0) / 750, 0, 1), ee = 1 - Math.pow(1 - p, 3);
-      c.position.x = en.x - 7 * (1 - ee);
-      if (p >= 1) delete c.userData.enter;
+    if (stageGroup) stageGroup.children.forEach(function (c) {
+      var tx = c.userData.tx, en = c.userData.enter;
+      if (en) {                                                      // drive into the spot
+        var p = clamp((now - en.t0) / 900, 0, 1), ee = 1 - Math.pow(1 - p, 3);
+        c.position.x = tx - 8 * (1 - ee);
+        if (p >= 1) delete c.userData.enter;
+      } else if (tx !== undefined && Math.abs(c.position.x - tx) > 0.001) {
+        c.position.x += (tx - c.position.x) * (reduced ? 1 : 0.12);  // glide when the row re-spaces
+      }
+      if (c.userData.pop) {                                          // real model settles in
+        var q = clamp((now - c.userData.pop) / 500, 0, 1);
+        c.scale.setScalar(0.97 + 0.03 * (1 - Math.pow(1 - q, 3)));
+        if (q >= 1) delete c.userData.pop;
+      }
     });
     controls.update();
     renderer.render(scene, camera);
