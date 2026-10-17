@@ -322,7 +322,7 @@
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
   renderer.outputEncoding = THREE.sRGBEncoding;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure = 1.12;
+  renderer.toneMappingExposure = 1.0;
   renderer.physicallyCorrectLights = false;
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
@@ -349,13 +349,30 @@
     return t;
   }
   var hasEnv = false;
-  if (THREE.RoomEnvironment) {                                     // studio reflections for realistic paint/glass
-    try {
-      var pmrem = new THREE.PMREMGenerator(renderer);
-      scene.environment = pmrem.fromScene(new THREE.RoomEnvironment(), 0.04).texture;
-      pmrem.dispose(); hasEnv = true;
-    } catch (e) { hasEnv = false; }
+  // Car-studio reflections: a dark room with a few softboxes, so paint keeps its own colour and gets
+  // long highlight streaks (a bright white room turns every metallic paint into chrome)
+  function studioScene() {
+    var sc = new THREE.Scene();
+    var room = new THREE.Mesh(new THREE.BoxGeometry(40, 18, 40), new THREE.MeshBasicMaterial({ color: 0x0c0e13, side: THREE.BackSide }));
+    room.position.y = 7; sc.add(room);
+    var floor = new THREE.Mesh(new THREE.PlaneGeometry(40, 40).rotateX(-Math.PI / 2), new THREE.MeshBasicMaterial({ color: 0x22252c }));
+    floor.position.y = -1.9; sc.add(floor);
+    function box(w, h, x, y, z, ry, rx, k) {
+      var m = new THREE.Mesh(new THREE.PlaneGeometry(w, h), new THREE.MeshBasicMaterial({ color: new THREE.Color(k, k, k * 1.04), side: THREE.DoubleSide }));
+      m.position.set(x, y, z); m.rotation.set(rx || 0, ry || 0, 0); sc.add(m);
+    }
+    box(22, 5, 0, 15.5, 0, 0, Math.PI / 2, 5);                       // long overhead softbox
+    box(14, 3, 0, 6, -19.5, 0, 0, 3);                                 // front strip
+    box(14, 3, 0, 6, 19.5, Math.PI, 0, 2.2);                          // back strip
+    box(5, 7, -19.5, 5, 0, Math.PI / 2, 0, 1.6);                      // side panels
+    box(5, 7, 19.5, 5, 0, -Math.PI / 2, 0, 1.2);
+    return sc;
   }
+  try {
+    var pmrem = new THREE.PMREMGenerator(renderer);
+    scene.environment = pmrem.fromScene(studioScene(), 0.03).texture;
+    pmrem.dispose(); hasEnv = true;
+  } catch (e) { hasEnv = false; }
   if (!hasEnv && renderer.capabilities.isWebGL2) { scene.environment = makeEnv(); hasEnv = true; }
 
   scene.add(new THREE.AmbientLight(0x9fb0d6, hasEnv ? 0.15 : 0.35));
@@ -1059,10 +1076,10 @@
                   min: [-2.54283, 0.02853, -1.00104], max: [2.82948, 1.68563, 1.00104] },
     cybertruck: { url: 'models/cybertruck.json', length: 5.68,  yaw: -Math.PI / 2,
                   min: [-149.5056, -62.37716, -60.19394], max: [164.14674, 41.62352, 60.19393] },
-    sedan:      { url: 'models/sedan.json',      length: 4.75,  yaw: Math.PI,
-                  min: [0, 0, -41.20945], max: [17.88422, 12.16401, 0.00476] },
-    sports:     { url: 'models/sports.json',     length: 4.79,  yaw: Math.PI,
-                  min: [-1.04507, 0.01437, -2.39551], max: [1.04507, 1.3699, 2.45306] },
+    sedan:      { url: 'models/sedan.json',      length: 4.80,  yaw: Math.PI,
+                  min: [-3.03151, 0.03137, -7.11583], max: [3.06397, 4.07923, 6.84005] },
+    sports:     { url: 'models/sports.json',     length: 4.58,  yaw: Math.PI,
+                  min: [-0.01049, -0.00015, -0.02289], max: [0.01049, 0.01371, 0.02344] },
     hatchback:  { url: 'models/hatchback.json',  length: 4.64,  yaw: Math.PI,
                   min: [-0.01047, -0.00013, -0.0245], max: [0.01047, 0.01488, 0.02199] },
     compactvan: { url: 'models/compactvan.json', length: 4.82,  yaw: Math.PI,
@@ -1091,7 +1108,7 @@
     w.traverse(function (o) {
       if (o.isMesh) {
         o.userData.real = true; o.castShadow = true; o.receiveShadow = true; o.frustumCulled = false;
-        (Array.isArray(o.material) ? o.material : [o.material]).forEach(function (m) { if (m && 'envMapIntensity' in m) m.envMapIntensity = 1.2; });
+        (Array.isArray(o.material) ? o.material : [o.material]).forEach(function (m) { if (m && 'envMapIntensity' in m) m.envMapIntensity = 1.0; });
       }
     });
     return { group: w, height: (mx[1] - mn[1]) * sc };
